@@ -25,16 +25,16 @@ from config          import (
     DATA_PATH, REPORTS_DIR, RANDOM_SEED, TEST_SIZE,
     METADATA_PATH, COMPARISON_PATH, MODEL_PATH,
 )
-from logger          import get_logger
+from logger           import get_logger
 from generate_dataset import generate_dataset
-from preprocessing   import run_eda, Preprocessor, apply_smote, select_features
-from models          import (
+from preprocessing    import run_eda, Preprocessor, apply_smote, select_features
+from models           import (
     train_all_models, evaluate_all_models,
     plot_comparison, plot_confusion_matrices, plot_roc_curves,
     tune_model,
 )
-from predictor       import CreditCardPredictor
-from utils           import save_metadata
+from predictor        import CreditCardPredictor
+from utils            import save_metadata
 
 log = get_logger(__name__)
 
@@ -90,17 +90,14 @@ def main() -> None:
     # ── 2. EDA (skip slow pairplot on cloud) ──────────────────────────────────
     if IS_CLOUD:
         # Run only the two fastest EDA plots on cloud
-        from preprocessing import Preprocessor, apply_smote, select_features
-        import pandas as _pd
         import matplotlib.pyplot as _plt
-        # Target distribution only
         counts = df["approved"].value_counts().sort_index()
         fig, ax = _plt.subplots(figsize=(5, 3))
         ax.bar(["Rejected", "Approved"], counts.values, color=["#E74C3C", "#2ECC71"])
         ax.set_title("Target Distribution")
         fig.savefig(str(REPORTS_DIR / "01_target_distribution.png"), dpi=100, bbox_inches="tight")
         _plt.close(fig)
-        print("  [EDA] Fast plots done (cloud mode).")
+        print("  [EDA] Fast plot done (cloud mode).")
     else:
         run_eda(df)
 
