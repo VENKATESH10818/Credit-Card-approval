@@ -1,22 +1,9 @@
 """
 train.py
 --------
-Full ML pipeline orchestrator:
-
-  1.  Load / generate dataset
-  2.  EDA
-  3.  Preprocess  (impute → encode → scale)
-  4.  Feature selection
-  5.  Train / test split
-  6.  Apply SMOTE on training set
-  7.  Train all 7 models
-  8.  Evaluate & compare
-  9.  Hyperparameter-tune the best model
-  10. SHAP global explanation plots
-  11. Save model artefacts + metadata
-
-Run:
-    python train.py
+Full ML pipeline orchestrator. Auto-detects cloud environment and
+uses lightweight settings to complete training within Streamlit Cloud
+free-tier limits (~3 min).
 """
 
 import os
@@ -34,7 +21,6 @@ matplotlib.use("Agg")
 from sklearn.model_selection import train_test_split
 from sklearn.metrics         import f1_score, accuracy_score
 
-# ── Local modules ─────────────────────────────────────────────────────────────
 from config          import (
     DATA_PATH, REPORTS_DIR, RANDOM_SEED, TEST_SIZE,
     METADATA_PATH, COMPARISON_PATH, MODEL_PATH,
@@ -47,11 +33,33 @@ from models          import (
     plot_comparison, plot_confusion_matrices, plot_roc_curves,
     tune_model,
 )
-from explainability  import plot_shap_summary
 from predictor       import CreditCardPredictor
 from utils           import save_metadata
 
 log = get_logger(__name__)
+
+# ── Detect cloud environment ──────────────────────────────────────────────────
+IS_CLOUD = (
+    os.environ.get("HOME", "").startswith("/home/adminuser")   # Streamlit Cloud
+    or os.environ.get("STREAMLIT_SHARING_MODE") == "true"
+    or os.environ.get("IS_CLOUD", "false").lower() == "true"
+)
+
+CLOUD_SETTINGS = {
+    "n_samples"   : 2000,   # smaller dataset
+    "tuning_iter" : 8,      # fewer RandomizedSearchCV iterations
+    "skip_shap"   : True,   # skip slow SHAP plots
+    "skip_models" : ["LightGBM", "Voting Ensemble"],  # skip heaviest models
+}
+
+LOCAL_SETTINGS = {
+    "n_samples"   : 6000,
+    "tuning_iter" : 20,
+    "skip_shap"   : False,
+    "skip_models" : [],
+}
+
+SETTINGS = CLOUD_SETTINGS if IS_CLOUD else LOCAL_SETTINGS
 
 
 def main() -> None:
@@ -59,19 +67,42 @@ def main() -> None:
 
     print("\n" + "█"*65)
     print("   CREDIT CARD APPROVAL PREDICTION — TRAINING PIPELINE v2")
+    if IS_CLOUD:
+        print("   [CLOUD MODE] Using lightweight settings for fast training")
     print("█"*65)
 
     # ── 1. Dataset ────────────────────────────────────────────────────────────
-    if not DATA_PATH.exists():
-        log.info("Dataset not found. Generating …")
-        df = generate_dataset()
+    # Always regenerate on cloud to avoid stale v1 data
+    if not DATA_PATH.exists() or IS_CLOUD:
+        log.info("Generating dataset  n=%d …", SETTINGS["n_samples"])
+        df = generate_dataset(n_samples=SETTINGS["n_samples"])
     else:
         df = pd.read_csv(DATA_PATH)
-        log.info("Dataset loaded  rows=%d", len(df))
-        print(f"\n[Data] Loaded {len(df):,} rows from {DATA_PATH}")
+        # Regenerate if missing new features
+        expected_cols = {"credit_utilization", "savings_balance", "marital_status"}
+        if not expected_cols.issubset(df.columns):
+            log.info("Old dataset detected — regenerating with new features …")
+            df = generate_dataset(n_samples=SETTINGS["n_samples"])
+        else:
+            log.info("Dataset loaded  rows=%d", len(df))
+            print(f"\n[Data] Loaded {len(df):,} rows from {DATA_PATH}")
 
-    # ── 2. EDA ────────────────────────────────────────────────────────────────
-    run_eda(df)
+    # ── 2. EDA (skip slow pairplot on cloud) ──────────────────────────────────
+    if IS_CLOUD:
+        # Run only the two fastest EDA plots on cloud
+        from preprocessing import Preprocessor, apply_smote, select_features
+        import pandas as _pd
+        import matplotlib.pyplot as _plt
+        # Target distribution only
+        counts = df["approved"].value_counts().sort_index()
+        fig, ax = _plt.subplots(figsize=(5, 3))
+        ax.bar(["Rejected", "Approved"], counts.values, color=["#E74C3C", "#2ECC71"])
+        ax.set_title("Target Distribution")
+        fig.savefig(str(REPORTS_DIR / "01_target_distribution.png"), dpi=100, bbox_inches="tight")
+        _plt.close(fig)
+        print("  [EDA] Fast plots done (cloud mode).")
+    else:
+        run_eda(df)
 
     # ── 3. Preprocessing ──────────────────────────────────────────────────────
     print("\n" + "="*65)
@@ -80,8 +111,6 @@ def main() -> None:
     preprocessor = Preprocessor()
     X, y = preprocessor.fit_transform(df)
     print(f"  Processed shape : X={X.shape}, y={y.shape}")
-    unique, counts = np.unique(y, return_counts=True)
-    print(f"  Class balance   : {dict(zip(unique.tolist(), counts.tolist()))}")
 
     # ── 4. Feature Selection ──────────────────────────────────────────────────
     select_features(X, y, preprocessor.feature_names, top_n=10)
@@ -99,7 +128,10 @@ def main() -> None:
     X_train_bal, y_train_bal = apply_smote(X_train, y_train)
 
     # ── 7. Train Models ───────────────────────────────────────────────────────
-    models = train_all_models(X_train_bal, y_train_bal)
+    # On cloud, skip heavy models to save time
+    skip = SETTINGS["skip_models"]
+    models_all = train_all_models(X_train_bal, y_train_bal)
+    models = {k: v for k, v in models_all.items() if k not in skip}
 
     # ── 8. Evaluate ───────────────────────────────────────────────────────────
     results_df = evaluate_all_models(models, X_test, y_test)
@@ -111,33 +143,36 @@ def main() -> None:
     print(f"\n  [Saved] {COMPARISON_PATH}")
 
     # ── 9. Tune Best Model ────────────────────────────────────────────────────
-    best_name = results_df.iloc[0]["Model"]
-    print(f"\n  Best model (F1): {best_name}")
-
-    # Don't tune Voting Ensemble — tune its best constituent instead
+    best_name   = results_df.iloc[0]["Model"]
     tune_target = best_name if best_name != "Voting Ensemble" else results_df.iloc[1]["Model"]
-    tuned = tune_model(tune_target, X_train_bal, y_train_bal)
 
-    # Re-evaluate tuned model
+    # Override tuning iterations for cloud
+    import config as _cfg
+    _orig_iter = _cfg.TUNING_ITER
+    _cfg.TUNING_ITER = SETTINGS["tuning_iter"]
+
+    tuned    = tune_model(tune_target, X_train_bal, y_train_bal)
+    _cfg.TUNING_ITER = _orig_iter  # restore
+
     y_pred_tuned = tuned.predict(X_test)
     tuned_f1     = f1_score(y_test, y_pred_tuned)
     tuned_acc    = accuracy_score(y_test, y_pred_tuned)
 
-    print(f"\n  Tuned {tune_target}  →  F1={tuned_f1:.4f}  Acc={tuned_acc:.4f}")
-    log.info("Tuned %s  F1=%.4f  Acc=%.4f", tune_target, tuned_f1, tuned_acc)
-
-    # Use tuned model only if it improves F1
-    base_f1 = float(results_df[results_df["Model"] == tune_target]["F1-Score"].iloc[0])
+    base_f1     = float(results_df[results_df["Model"] == tune_target]["F1-Score"].iloc[0])
     final_model = tuned if tuned_f1 >= base_f1 else models[tune_target]
     final_name  = tune_target
     final_f1    = max(tuned_f1, base_f1)
     print(f"  Final model: {final_name}  (F1={final_f1:.4f})")
 
-    # ── 10. SHAP Plots ────────────────────────────────────────────────────────
-    print("\n" + "="*65)
-    print("  SHAP GLOBAL EXPLAINABILITY")
-    print("="*65)
-    plot_shap_summary(final_model, X_train_bal, preprocessor.feature_names)
+    # ── 10. SHAP (skip on cloud) ──────────────────────────────────────────────
+    if not SETTINGS["skip_shap"]:
+        from explainability import plot_shap_summary
+        print("\n" + "="*65)
+        print("  SHAP GLOBAL EXPLAINABILITY")
+        print("="*65)
+        plot_shap_summary(final_model, X_train_bal, preprocessor.feature_names)
+    else:
+        print("\n  [SHAP] Skipped in cloud mode.")
 
     # ── 11. Save Artefacts ────────────────────────────────────────────────────
     predictor = CreditCardPredictor(final_model, preprocessor, X_train_bal)
@@ -146,60 +181,38 @@ def main() -> None:
     elapsed = round(time.perf_counter() - t_start, 1)
 
     metadata = {
-        "model_name"       : final_name,
-        "f1_score"         : round(final_f1, 4),
-        "accuracy"         : round(tuned_acc, 4),
-        "features"         : preprocessor.feature_names,
-        "n_train"          : int(len(X_train_bal)),
-        "n_test"           : int(len(X_test)),
-        "training_time_s"  : elapsed,
-        "smote_applied"    : True,
-        "all_models"       : results_df.to_dict(orient="records"),
+        "model_name"      : final_name,
+        "f1_score"        : round(final_f1, 4),
+        "accuracy"        : round(tuned_acc, 4),
+        "features"        : preprocessor.feature_names,
+        "n_train"         : int(len(X_train_bal)),
+        "n_test"          : int(len(X_test)),
+        "training_time_s" : elapsed,
+        "smote_applied"   : True,
+        "cloud_mode"      : IS_CLOUD,
+        "all_models"      : results_df.to_dict(orient="records"),
     }
     save_metadata(metadata, METADATA_PATH)
 
     # ── Smoke Test ────────────────────────────────────────────────────────────
     print("\n" + "="*65)
-    print("  SMOKE TEST — Sample Predictions")
+    print("  SMOKE TEST")
     print("="*65)
-    smoke_applicants = [
-        {   # Strong
-            "age": 45, "income": 130_000, "employment_status": "Employed",
-            "credit_score": 790, "years_employed": 14, "existing_loans": 0,
-            "loan_amount": 0, "repayment_history": "Good", "education": "Master",
-            "num_credit_cards": 3, "debt_to_income": 0.0, "credit_utilization": 0.12,
-            "monthly_expenses": 3500, "savings_balance": 85_000,
-            "months_since_last_default": 0, "marital_status": "Married",
-            "housing_status": "Own",
-        },
-        {   # Weak
-            "age": 23, "income": 18_000, "employment_status": "Unemployed",
-            "credit_score": 325, "years_employed": 0, "existing_loans": 4,
-            "loan_amount": 22_000, "repayment_history": "Poor", "education": "High School",
-            "num_credit_cards": 1, "debt_to_income": 0.88, "credit_utilization": 0.92,
-            "monthly_expenses": 2000, "savings_balance": 200,
-            "months_since_last_default": 6, "marital_status": "Single",
-            "housing_status": "Rent",
-        },
-    ]
-
-    for i, app in enumerate(smoke_applicants, 1):
-        r = predictor.predict(app)
-        print(f"\n  Applicant #{i}  →  {r['decision']}  "
-              f"(prob={r['probability']:.2%}, risk={r['risk']['level']}, "
-              f"{r['latency_ms']} ms)")
-        for reason in r["reasons"]:
-            print(f"    • {reason}")
+    test_app = {
+        "age": 35, "income": 75000, "employment_status": "Employed",
+        "credit_score": 700, "years_employed": 8, "existing_loans": 1,
+        "loan_amount": 5000, "repayment_history": "Good", "education": "Bachelor",
+        "num_credit_cards": 2, "debt_to_income": 0.07, "credit_utilization": 0.20,
+        "monthly_expenses": 2500, "savings_balance": 15000,
+        "months_since_last_default": 0, "marital_status": "Married",
+        "housing_status": "Rent",
+    }
+    r = predictor.predict(test_app)
+    print(f"  Test prediction → {r['decision']} (prob={r['probability']:.2%})")
 
     print("\n" + "█"*65)
     print(f"  PIPELINE COMPLETE  ({elapsed}s)")
     print("█"*65)
-    print(f"\n  Reports  → {REPORTS_DIR}")
-    print(f"  Models   → {MODEL_PATH.parent}")
-    print(f"\n  Launch app:")
-    print(f"    streamlit run app.py")
-    print(f"  Launch API:")
-    print(f"    uvicorn api:app --reload --port 8000")
 
 
 if __name__ == "__main__":

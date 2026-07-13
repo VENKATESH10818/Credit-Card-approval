@@ -4,21 +4,23 @@ pandas
 scikit-learn
 imbalanced-learn
 xgboost
-lightgbm
-shap
 joblib
 scipy
-
-# ── Web / API ──────────────────────────────────────────────────────────────────
-streamlit
-fastapi
-uvicorn[standard]
-pydantic
-python-multipart
 
 # ── Visualisation ──────────────────────────────────────────────────────────────
 matplotlib
 seaborn
 
+# ── Web UI ─────────────────────────────────────────────────────────────────────
+streamlit
+
 # ── Utilities ──────────────────────────────────────────────────────────────────
 python-dotenv
+
+# ── Optional heavy packages (comment out if deploy is slow) ───────────────────
+# lightgbm
+# shap
+# fastapi
+# uvicorn[standard]
+# pydantic
+# python-multipart
