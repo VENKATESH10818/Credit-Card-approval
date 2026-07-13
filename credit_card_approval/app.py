@@ -24,14 +24,49 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import streamlit as st
 
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from predictor  import CreditCardPredictor
-from config     import COMPARISON_PATH, METADATA_PATH, REPORTS_DIR, VALID_CATEGORIES
+from config     import COMPARISON_PATH, METADATA_PATH, REPORTS_DIR, VALID_CATEGORIES, MODEL_PATH
 from utils      import load_metadata, load_batch_csv
 from logger     import get_logger
 
 log = get_logger("streamlit_app")
+
+
+# ── Auto-train if no model exists (Streamlit Cloud compatibility) ─────────────
+def _auto_train() -> None:
+    """Run the full training pipeline automatically when no model is found.
+    This makes the app self-contained on Streamlit Cloud without needing
+    a separate train step.
+    """
+    import subprocess
+    script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "train.py")
+    st.info("⏳ No trained model found. Training now — this takes 2–4 minutes on first run…")
+    progress = st.progress(0, text="Starting training pipeline…")
+
+    try:
+        result = subprocess.run(
+            [sys.executable, script],
+            capture_output=True, text=True, timeout=600,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
+        )
+        if result.returncode == 0:
+            progress.progress(100, text="Training complete!")
+            st.success("✅ Model trained successfully! Refreshing…")
+            st.rerun()
+        else:
+            progress.empty()
+            st.error("Training failed. See details below.")
+            st.code(result.stderr[-3000:] if result.stderr else result.stdout[-3000:])
+    except subprocess.TimeoutExpired:
+        progress.empty()
+        st.error("Training timed out (>10 min). Try a smaller dataset or upgrade your deployment plan.")
+    except Exception as e:
+        progress.empty()
+        st.error(f"Training error: {e}")
+
+
+from predictor import CreditCardPredictor
 
 # ── Page config ───────────────────────────────────────────────────────────────
 st.set_page_config(
@@ -109,7 +144,6 @@ st.markdown("""
 @st.cache_resource(show_spinner="Loading model…")
 def load_predictor():
     return CreditCardPredictor.load()
-
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def risk_badge_html(level: str) -> str:
     css = {
@@ -520,7 +554,12 @@ Docs:      http://localhost:8000/docs
 # MAIN — Sidebar navigation + routing
 # ═══════════════════════════════════════════════════════════════════════════════
 def main() -> None:
-    # ── Sidebar ──────────────────────────────────────────────────────────────
+    # ── Auto-train check (Streamlit Cloud / first run) ────────────────────────
+    if not MODEL_PATH.exists():
+        _auto_train()
+        st.stop()
+
+    # ── Sidebar ───────────────────────────────────────────────────────────────
     with st.sidebar:
         st.markdown("## 💳 CreditAI")
         st.markdown("*Credit Card Approval System*")
@@ -555,7 +594,6 @@ def main() -> None:
         except FileNotFoundError:
             st.error("Model not found. Please run `python train.py` first.")
             st.stop()
-
     # ── Route ─────────────────────────────────────────────────────────────────
     if page == "🔍 Single Prediction":
         page_single_prediction(predictor)
