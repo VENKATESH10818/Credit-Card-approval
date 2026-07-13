@@ -167,8 +167,9 @@ def _plot_boxplots(df: pd.DataFrame) -> None:
             df.loc[df[TARGET_COL] == 0, col].dropna(),
             df.loc[df[TARGET_COL] == 1, col].dropna(),
         ]
-        bp = axes[i].boxplot(data, labels=["Rejected", "Approved"],
-                             patch_artist=True, notch=True)
+        bp = axes[i].boxplot(data, patch_artist=True, notch=False)
+        axes[i].set_xticks([1, 2])
+        axes[i].set_xticklabels(["Rejected", "Approved"])
         bp["boxes"][0].set_facecolor("#E74C3C")
         bp["boxes"][1].set_facecolor("#2ECC71")
         for box in bp["boxes"]:
