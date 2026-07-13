@@ -105,7 +105,7 @@ def _build_base_models() -> dict:
     if _HAS_XGB:
         models["XGBoost"] = XGBClassifier(
             n_estimators=200, learning_rate=0.1,
-            max_depth=6, use_label_encoder=False,
+            max_depth=6,
             eval_metric="logloss", random_state=RANDOM_SEED,
             scale_pos_weight=1, n_jobs=-1,
         )
@@ -130,7 +130,7 @@ def _build_base_models() -> dict:
     if _HAS_XGB:
         voters.append(("xgb", XGBClassifier(
             n_estimators=200, learning_rate=0.1, max_depth=6,
-            use_label_encoder=False, eval_metric="logloss",
+            eval_metric="logloss",
             random_state=RANDOM_SEED, n_jobs=-1,
         )))
 

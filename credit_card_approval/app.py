@@ -464,7 +464,7 @@ def page_model_dashboard() -> None:
         cols   = st.columns(2)
         for i, (title, path) in enumerate(available.items()):
             with cols[i % 2]:
-                st.image(str(path), caption=title, use_column_width=True)
+                st.image(str(path), caption=title, use_container_width=True)
     else:
         st.info("Run `python train.py` to generate training plots.")
 
