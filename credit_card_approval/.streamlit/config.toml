@@ -1,0 +1,13 @@
+[theme]
+primaryColor       = "#1565C0"
+backgroundColor    = "#F0F4F8"
+secondaryBackgroundColor = "#E8EAF6"
+textColor          = "#1A237E"
+font               = "sans serif"
+
+[server]
+maxUploadSize      = 50          # MB – for batch CSV uploads
+enableXsrfProtection = true
+
+[browser]
+gatherUsageStats   = false
